@@ -3,7 +3,6 @@ local proc_mgmt = require "kong.runloop.plugin_servers.process"
 local cjson = require "cjson.safe"
 local clone = require "table.clone"
 local ngx_ssl = require "ngx.ssl"
-local SIGTERM = 15
 
 local type = type
 local pairs = pairs
@@ -14,7 +13,6 @@ local ngx = ngx
 local kong = kong
 local ngx_var = ngx.var
 local ngx_sleep = ngx.sleep
-local worker_id = ngx.worker.id
 
 local coroutine_running = coroutine.running
 local get_plugin_info = proc_mgmt.get_plugin_info
@@ -303,9 +301,6 @@ function rpc_notifications:serverPid(n)
 end
 
 
-
-
-
 --- Phase closures
 local function build_phases(plugin)
   if not plugin then
@@ -384,36 +379,22 @@ function plugin_servers.load_schema(plugin_name)
   return false, "no plugin found"
 end
 
-
 function plugin_servers.start()
-  if worker_id() ~= 0 then
-    return
-  end
-
-  local pluginserver_timer = proc_mgmt.pluginserver_timer
-
-  for _, server_def in ipairs(proc_mgmt.get_server_defs()) do
-    if server_def.start_command then
-      native_timer_at(0, pluginserver_timer, server_def)
-    end
-  end
-
   -- in case plugin server restarts, all workers need to update their defs
   kong.worker_events.register(function (data)
     reset_instances_for_plugin(data.plugin_name)
   end, "plugin_server", "reset_instances")
+
+  assert(proc_mgmt.start_pluginservers())
+
+  return true
 end
 
 function plugin_servers.stop()
-  if worker_id() ~= 0 then
-    return
-  end
+  assert(proc_mgmt.stop_pluginservers())
 
-  for _, server_def in ipairs(proc_mgmt.get_server_defs()) do
-    if server_def.proc then
-      server_def.proc:kill(SIGTERM)
-    end
-  end
+  return true
 end
+
 
 return plugin_servers

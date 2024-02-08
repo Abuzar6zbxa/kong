@@ -2,11 +2,14 @@ local cjson = require "cjson.safe"
 local raw_log = require "ngx.errlog".raw_log
 
 local _, ngx_pipe = pcall(require, "ngx.pipe")
+local worker_id = ngx.worker.id
+local native_timer_at = _G.native_timer_at or ngx.timer.at
 
 
 local kong = kong
 local ngx_INFO = ngx.INFO
 local cjson_decode = cjson.decode
+local SIGTERM = 15
 
 
 local proc_mgmt = {}
@@ -136,7 +139,8 @@ local function grab_logs(proc, name)
   end
 end
 
-function proc_mgmt.pluginserver_timer(premature, server_def)
+
+local function pluginserver_timer(premature, server_def)
   if premature then
     return
   end
@@ -177,5 +181,36 @@ function proc_mgmt.pluginserver_timer(premature, server_def)
 end
 
 
+function proc_mgmt.start_pluginservers()
+  local kong_config = kong.configuration
+
+  -- only worker 0 manages plugin server processes
+  if worker_id() == 0 then -- TODO move to privileged worker?
+    local pluginserver_timer = pluginserver_timer
+
+    for _, server_def in ipairs(kong_config.pluginservers) do
+      if server_def.start_command then
+        native_timer_at(0, pluginserver_timer, server_def)
+      end
+    end
+  end
+
+  return true
+end
+
+function proc_mgmt.stop_pluginservers()
+  local kong_config = kong.configuration
+
+  -- only worker 0 manages plugin server processes
+  if worker_id() == 0 then -- TODO move to privileged worker?
+    for _, server_def in ipairs(kong_config.pluginservers) do
+      if server_def.proc then
+        server_def.proc:kill(SIGTERM)
+      end
+    end
+  end
+
+  return true
+end
 
 return proc_mgmt
