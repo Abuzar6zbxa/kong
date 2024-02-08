@@ -1,5 +1,4 @@
 local cjson = require "cjson.safe"
-local pl_path = require "pl.path"
 local raw_log = require "ngx.errlog".raw_log
 
 local _, ngx_pipe = pcall(require, "ngx.pipe")
@@ -9,69 +8,9 @@ local kong = kong
 local ngx_INFO = ngx.INFO
 local cjson_decode = cjson.decode
 
+
 local proc_mgmt = {}
 
-local _servers
-local _plugin_infos
-
---[[
-
-Configuration
-
-We require three settings to communicate with each pluginserver.  To make it
-fit in the config structure, use a dynamic namespace and generous defaults.
-
-- pluginserver_names: a list of names, one for each pluginserver.
-
-- pluginserver_XXX_socket: unix socket to communicate with the pluginserver.
-- pluginserver_XXX_start_cmd: command line to strat the pluginserver.
-- pluginserver_XXX_query_cmd: command line to query the pluginserver.
-
-Note: the `_start_cmd` and `_query_cmd` are set to the defaults only if
-they exist on the filesystem.  If omitted and the default doesn't exist,
-they're disabled.
-
-A disabled `_start_cmd` (unset and the default doesn't exist in the filesystem)
-means this process isn't managed by Kong.  It's expected that the socket
-still works, supposedly handled by an externally-managed process.
-
-A disable `_query_cmd` means it won't be queried and so the corresponding
-socket wouldn't be used, even if the process is managed (if the `_start_cmd`
-is valid).  Currently this has no use, but it could eventually be added via
-other means, perhaps dynamically.
-
---]]
-
-local function ifexists(path)
-  if pl_path.exists(path) then
-    return path
-  end
-end
-
-
-local function get_server_defs()
-  local config = kong.configuration
-
-  if not _servers then
-    _servers = {}
-
-    for i, name in ipairs(config.pluginserver_names) do
-      name = name:lower()
-      kong.log.debug("search config for pluginserver named: ", name)
-      local env_prefix = "pluginserver_" .. name:gsub("-", "_")
-      _servers[i] = {
-        name = name,
-        socket = config[env_prefix .. "_socket"] or "/usr/local/kong/" .. name .. ".socket",
-        start_command = config[env_prefix .. "_start_cmd"] or ifexists("/usr/local/bin/"..name),
-        query_command = config[env_prefix .. "_query_cmd"] or ifexists("/usr/local/bin/query_"..name),
-      }
-    end
-  end
-
-  return _servers
-end
-
-proc_mgmt.get_server_defs = get_server_defs
 
 --[[
 
