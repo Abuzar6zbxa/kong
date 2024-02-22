@@ -90,6 +90,8 @@ end
 function _M.load_external_plugins_info(kong_conf)
   local available_external_plugins = {}
 
+  kong.log.debug("[pluginserver] loading external plugins info")
+
   for _, pluginserver in ipairs(kong_conf.pluginservers) do
     local plugin_info, err = query_external_plugin_info(pluginserver)
     if not plugin_info then
@@ -98,6 +100,8 @@ function _M.load_external_plugins_info(kong_conf)
 
     available_external_plugins[plugin_info.name] = plugin_info
   end
+
+  kong.log.debug("[pluginserver] loaded #", #available_external_plugins, " external plugins info")
 
   return available_external_plugins
 end
@@ -148,7 +152,7 @@ local function pluginserver_timer(premature, server_def)
       ngx.sleep(next_spawn - ngx.now())
     end
 
-    kong.log.notice("Starting " .. server_def.name or "")
+    kong.log.notice("[pluginserver] starting pluginserver process for " .. server_def.name or "")
     server_def.proc = assert(ngx_pipe.spawn("exec " .. server_def.start_command, {
       merge_stderr = true,
     }))
@@ -158,18 +162,25 @@ local function pluginserver_timer(premature, server_def)
     while true do
       grab_logs(server_def.proc, server_def.name)
       local ok, reason, status = server_def.proc:wait()
+
+      -- exited with a non 0 status
       if ok == false and reason == "exit" and status == 127 then
         kong.log.err(string.format(
-                "external pluginserver %q start command %q exited with \"command not found\"",
+                "[pluginserver] external pluginserver %q start command %q exited with \"command not found\"",
                 server_def.name, server_def.start_command))
         break
+
+      -- waited on an exited thread
       elseif ok ~= nil or reason == "exited" or ngx.worker.exiting() then
         kong.log.notice("external pluginserver '", server_def.name, "' terminated: ", tostring(reason), " ", tostring(status))
         break
       end
+
+      -- XXX what happens if the process stops with a 0 status code?
     end
   end
-  kong.log.notice("Exiting: pluginserver '", server_def.name, "' not respawned.")
+
+  kong.log.notice("[pluginserver] exiting: pluginserver '", server_def.name, "' not respawned.")
 end
 
 
@@ -181,7 +192,7 @@ function _M.start_pluginservers()
     local pluginserver_timer = pluginserver_timer
 
     for _, server_def in ipairs(kong_config.pluginservers) do
-      if server_def.start_command then
+      if server_def.start_command then -- if not defined, we assume it's managed externally
         native_timer_at(0, pluginserver_timer, server_def)
       end
     end
@@ -197,7 +208,11 @@ function _M.stop_pluginservers()
   if worker_id() == 0 then -- TODO move to privileged worker?
     for _, server_def in ipairs(kong_config.pluginservers) do
       if server_def.proc then
-        server_def.proc:kill(SIGTERM)
+        local ok, err = server_def.proc:kill(SIGTERM)
+        if not ok then
+          kong.log.error("[pluginserver] failed to stop pluginserver '", server_def.name, ": ", err)
+        end
+        kong.log.notice("[pluginserver] successfully stopped pluginserver '", server_def.name)
       end
     end
   end
