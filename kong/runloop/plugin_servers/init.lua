@@ -1,4 +1,3 @@
-
 local proc_mgmt = require "kong.runloop.plugin_servers.process"
 local cjson = require "cjson.safe"
 local clone = require "table.clone"
@@ -15,7 +14,6 @@ local ngx_var = ngx.var
 local ngx_sleep = ngx.sleep
 
 local coroutine_running = coroutine.running
-local get_plugin_info = proc_mgmt.get_plugin_info
 local get_ctx_table = require("resty.core.ctx").get_ctx_table
 
 local cjson_encode = cjson.encode
@@ -154,6 +152,7 @@ local exposed_api = {
 }
 
 
+local get_plugin
 local get_instance_id
 local reset_instance
 local reset_instances_for_plugin
@@ -232,7 +231,7 @@ function get_instance_id(plugin_name, conf)
     instance_info.id = nil
   end
 
-  local plugin_info = get_plugin_info(plugin_name)
+  local plugin_info = get_plugin(plugin_name)
   local server_rpc  = get_server_rpc(plugin_info.server_def)
 
   local new_instance_info, err = server_rpc:call_start_instance(plugin_name, conf)
@@ -344,24 +343,39 @@ local function build_phases(plugin)
 end
 
 
-
 --- module table
-local plugin_servers = {}
+local _M = {}
 
+-- module cache of loaded external plugins
+-- XXX what to do about invalidations?
+local loaded_plugins
 
-local loaded_plugins = {}
+local function load_external_plugins()
+  if loaded_plugins then
+    return true
+  end
 
-local function get_plugin(plugin_name)
-  kong = kong or _G.kong    -- some CLI cmds set the global after loading the module.
-  if not loaded_plugins[plugin_name] then
-    local plugin = get_plugin_info(plugin_name)
+  loaded_plugins = {}
+
+  local kong_config = kong.configuration
+
+  local plugins_info = proc_mgmt.load_external_plugins_info(kong_config)
+  assert(next(plugins_info), "failed loading external plugins")
+
+  for plugin_name, plugin in pairs(plugins_info) do
     loaded_plugins[plugin_name] = build_phases(plugin)
   end
+
+  return loaded_plugins
+end
+
+function get_plugin(plugin_name)
+  load_external_plugins()
 
   return loaded_plugins[plugin_name]
 end
 
-function plugin_servers.load_plugin(plugin_name)
+function _M.load_plugin(plugin_name)
   local plugin = get_plugin(plugin_name)
   if plugin and plugin.PRIORITY then
     return true, plugin
@@ -370,7 +384,7 @@ function plugin_servers.load_plugin(plugin_name)
   return false, "no plugin found"
 end
 
-function plugin_servers.load_schema(plugin_name)
+function _M.load_schema(plugin_name)
   local plugin = get_plugin(plugin_name)
   if plugin and plugin.PRIORITY then
     return true, plugin.schema
@@ -379,7 +393,7 @@ function plugin_servers.load_schema(plugin_name)
   return false, "no plugin found"
 end
 
-function plugin_servers.start()
+function _M.start()
   -- in case plugin server restarts, all workers need to update their defs
   kong.worker_events.register(function (data)
     reset_instances_for_plugin(data.plugin_name)
@@ -390,11 +404,11 @@ function plugin_servers.start()
   return true
 end
 
-function plugin_servers.stop()
+function _M.stop()
   assert(proc_mgmt.stop_pluginservers())
 
   return true
 end
 
 
-return plugin_servers
+return _M

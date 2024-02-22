@@ -1,7 +1,6 @@
 local cjson = require "cjson.safe"
 local raw_log = require "ngx.errlog".raw_log
-
-local _, ngx_pipe = pcall(require, "ngx.pipe")
+local ngx_pipe = require "ngx.pipe"
 local worker_id = ngx.worker.id
 local native_timer_at = _G.native_timer_at or ngx.timer.at
 
@@ -12,11 +11,10 @@ local cjson_decode = cjson.decode
 local SIGTERM = 15
 
 
-local proc_mgmt = {}
+local _M = {}
 
 
 --[[
-
 Plugin info requests
 
 Disclaimer:  The best way to do it is to have "ListPlugins()" and "GetInfo(plugin)"
@@ -44,69 +42,64 @@ defining the name, priority, version,  schema and phases of one plugin.
 
 This array should describe all plugins currently available through this server,
 no matter if actually enabled in Kong's configuration or not.
-
 --]]
 
-
-local function register_plugin_info(server_def, plugin_info)
-  if _plugin_infos[plugin_info.Name] then
-    kong.log.err(string.format("Duplicate plugin name [%s] by %s and %s",
-      plugin_info.Name, _plugin_infos[plugin_info.Name].server_def.name, server_def.name))
-    return
-  end
-
-  _plugin_infos[plugin_info.Name] = {
-    server_def = server_def,
-    --rpc = server_def.rpc,
-    name = plugin_info.Name,
-    PRIORITY = plugin_info.Priority,
-    VERSION = plugin_info.Version,
-    schema = plugin_info.Schema,
-    phases = plugin_info.Phases,
-  }
-end
-
-local function ask_info(server_def)
+local function query_external_plugin_info(server_def)
   if not server_def.query_command then
-    kong.log.info(string.format("No info query for %s", server_def.name))
-    return
+    return nil, "no info query for " .. server_def.name
   end
 
   local fd, err = io.popen(server_def.query_command)
   if not fd then
-    local msg = string.format("loading plugins info from [%s]:\n", server_def.name)
-    kong.log.err(msg, err)
-    return
+    return nil, string.format("error loading plugins info from [%s]: %s", server_def.name, err)
   end
 
   local infos_dump = fd:read("*a")
   fd:close()
-  local dump = cjson_decode(infos_dump)
+  local dump, err = cjson_decode(infos_dump)
+  if err then
+    return nil, "failed decoding plugin info: " .. err
+  end
+
   if type(dump) ~= "table" then
-    error(string.format("Not a plugin info table: \n%s\n%s",
-      server_def.query_command, infos_dump))
-    return
+    return nil, string.format("not a plugin info table: \n%s\n%s", server_def.query_command, infos_dump)
   end
 
   server_def.protocol = dump.Protocol or "MsgPack:1"
-  local infos = dump.Plugins or dump
+  local info = dump.Plugins[1] or dump -- XXX can a pluginserver (in the embedded plugin server world
+                                        -- have more than one plugin? only a single
+                                        -- configuration is initialized currently, so this
+                                        -- seems to be legacy code)
 
-  for _, plugin_info in ipairs(infos) do
-    register_plugin_info(server_def, plugin_info)
-  end
+  -- once upon a time, a plugin server could serve more than one plugin
+  -- nowadays, external plugins use an "embedded pluginserver" model, where
+  -- each plugin acts as an independent pluginserver
+
+  return {
+    server_def = server_def,
+    --rpc = server_def.rpc, -- XXX ???
+    name = info.Name,
+    PRIORITY = info.Priority,
+    VERSION = info.Version,
+    schema = info.Schema,
+    phases = info.Phases,
+  }
 end
 
-function proc_mgmt.get_plugin_info(plugin_name)
-  if not _plugin_infos then
-    kong = kong or _G.kong    -- some CLI cmds set the global after loading the module.
-    _plugin_infos = {}
 
-    for _, server_def in ipairs(get_server_defs()) do
-      ask_info(server_def)
+function _M.load_external_plugins_info(kong_conf)
+  local available_external_plugins = {}
+
+  for _, pluginserver in ipairs(kong_conf.pluginservers) do
+    local plugin_info, err = query_external_plugin_info(pluginserver)
+    if not plugin_info then
+      return nil, err
     end
+
+    available_external_plugins[plugin_info.name] = plugin_info
   end
 
-  return _plugin_infos[plugin_name]
+  return available_external_plugins
 end
 
 
@@ -120,7 +113,6 @@ event and respawns the server.
 
 If the `_start_cmd` is unset (and the default doesn't exist in the filesystem)
 it's assumed the process is managed externally.
-
 --]]
 
 local function grab_logs(proc, name)
@@ -181,7 +173,7 @@ local function pluginserver_timer(premature, server_def)
 end
 
 
-function proc_mgmt.start_pluginservers()
+function _M.start_pluginservers()
   local kong_config = kong.configuration
 
   -- only worker 0 manages plugin server processes
@@ -198,7 +190,7 @@ function proc_mgmt.start_pluginservers()
   return true
 end
 
-function proc_mgmt.stop_pluginservers()
+function _M.stop_pluginservers()
   local kong_config = kong.configuration
 
   -- only worker 0 manages plugin server processes
@@ -213,4 +205,4 @@ function proc_mgmt.stop_pluginservers()
   return true
 end
 
-return proc_mgmt
+return _M
