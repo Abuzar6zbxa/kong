@@ -10,11 +10,14 @@ local http_mock = require "spec.helpers.http_mock"
 local cjson     = require "cjson"
 local meta      = require "kong.meta"
 
+local str_fmt   = string.format
+
 local SERVER_TOKENS = meta._SERVER_TOKENS
 
 for _, strategy in helpers.all_strategies() do
   describe("append Kong Gateway info to the 'Via' header [#" .. strategy .. "]", function()
-    local mock, proxy_client
+    local mock, proxy_client, declarative_config
+
     lazy_setup(function()
       local mock_port = helpers.get_available_port()
       mock = http_mock.new(mock_port, {
@@ -59,7 +62,20 @@ ngx.header["Content-type"] = 'application/json'
         service = { id = service.id },
       })
 
-      local declarative_config = strategy == "off" and helpers.make_yaml_file() or nil
+      declarative_config = helpers.make_yaml_file(str_fmt([=[
+        _format_version: '3.0'
+        _transform: true
+        services:
+        - name: via_service
+          url: "http://127.0.0.1:%s/via"
+          routes:
+          - name: via_route
+            hosts:
+            - test.via
+            paths:
+            - /get
+      ]=], mock_port))
+
       assert(helpers.start_kong({
         database = strategy,
         plugins = "bundled",
