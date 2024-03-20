@@ -146,7 +146,7 @@ describe("headers [#" .. strategy .. "]", function()
         })
 
         assert.res_status(200, res)
-        assert.equal(default_server_header, res.headers["via"])
+        assert.equal(default_via_value, res.headers["via"])
         assert.not_equal(default_via_value, res.headers["server"])
       end)
 
