@@ -15,7 +15,8 @@ local str_find = string.find
 local proto_fname = "kong/pluginsocket.proto"
 
 local Rpc = {}
-Rpc.__index = Rpc
+local _mt = {}
+_mt.__index = Rpc
 
 
 local pb_unwrap
@@ -283,18 +284,23 @@ local function write_frame(c, msg)
   assert (c:send(msg))
 end
 
-function Rpc.new(socket_path, notifications)
+function Rpc.new(socket_path, callbacks)
 
   if not rpc_service then
     rpc_service = load_service()
   end
 
   --kong.log.debug("pb_rpc.new: ", socket_path)
-  return setmetatable({
+  local self = setmetatable({
     socket_path = socket_path,
     msg_id = 0,
-    notifications_callbacks = notifications,
-  }, Rpc)
+    get_instance_id = callbacks.get_instance_id,
+    reset_instance = callbacks.reset_instance,
+    exposed_pdk = callbacks.exposed_pdk,
+    notifications_callbacks = callbacks.notifications,
+  }, _mt)
+
+  return self
 end
 
 

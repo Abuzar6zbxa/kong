@@ -1,5 +1,6 @@
 local proc_mgmt = require "kong.runloop.plugin_servers.process"
 local bridge = require "kong.runloop.plugin_servers.bridge"
+local rpc = require "kong.runloop.plugin_servers.rpc"
 
 local type = type
 local pairs = pairs
@@ -61,38 +62,6 @@ local function reset_instance(plugin_name, conf)
   end
 end
 
-local protocol_implementations = {
-  ["MsgPack:1"] = "kong.runloop.plugin_servers.mp_rpc",
-  ["ProtoBuf:1"] = "kong.runloop.plugin_servers.pb_rpc",
-}
-
-local function get_server_rpc(plugin)
-  local server_def = plugin.server_def
-
-  if not server_def.rpc then
-
-    local rpc_modname = protocol_implementations[server_def.protocol]
-    if not rpc_modname then
-      return nil, "unknown protocol implementation: " .. (server_def.protocol or "nil")
-    end
-
-    kong.log.notice("[pluginserver] loading protocol ", server_def.protocol, " for plugin ", plugin.name)
-
-    local rpc = require (rpc_modname)
-    rpc.get_instance_id = get_instance_id
-    rpc.reset_instance = reset_instance
-    rpc.exposed_pdk = bridge.exposed_pdk
-
-    server_def.rpc = rpc.new(server_def.socket, rpc_notifications)
-                                                -- XXX 2nd argument refers to "rpc notifications"
-                                                -- which is NYI in the pb-based protocol
-                                                -- so this applies only to mp-based,
-                                                -- consider moving it to the mp module
-  end
-
-  return server_def.rpc
-end
-
 -- module cache of loaded external plugins
 -- XXX do we need to invalidate - eg, when the pluginserver restarts?
 local loaded_plugins
@@ -111,7 +80,12 @@ local function load_external_plugins()
 
   for plugin_name, plugin in pairs(plugins_info) do
     local plugin = bridge.build_phases(plugin)
-    local rpc, err = get_server_rpc(plugin)
+    local rpc, err = rpc.new(plugin, {
+      get_instance_id = get_instance_id,
+      reset_instance = reset_instance,
+      exposed_pdk = bridge.exposed_pdk,
+      rpc_notifications = rpc_notifications,
+    })
     if not rpc then
       return nil, err
     end
