@@ -201,6 +201,7 @@ build = {
     ["kong.runloop.balancer.upstreams"] = "kong/runloop/balancer/upstreams.lua",
     ["kong.runloop.plugin_servers"] = "kong/runloop/plugin_servers/init.lua",
     ["kong.runloop.plugin_servers.process"] = "kong/runloop/plugin_servers/process.lua",
+    ["kong.runloop.plugin_servers.bridge"] = "kong/runloop/plugin_servers/bridge.lua",
     ["kong.runloop.plugin_servers.mp_rpc"] = "kong/runloop/plugin_servers/mp_rpc.lua",
     ["kong.runloop.plugin_servers.pb_rpc"] = "kong/runloop/plugin_servers/pb_rpc.lua",
     ["kong.runloop.wasm"] = "kong/runloop/wasm.lua",

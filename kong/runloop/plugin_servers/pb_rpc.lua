@@ -212,7 +212,7 @@ local function load_service()
 
       service[lower_name] = {
         method_name = method_name,
-        method = index_table(Rpc.exposed_api, lower_name),
+        method = index_table(Rpc.exposed_pdk, lower_name),
         input_type = m.input_type,
         output_type = m.output_type,
       }
@@ -239,7 +239,7 @@ local function call_pdk(method_name, arg)
     return nil, ("method %q not found"):format(method_name)
   end
 
-  local saved = Rpc.save_for_later[coroutine.running()]
+  local saved = Rpc.exposed_pdk.get_saved_for_later()
   if saved and saved.plugin_name then
     kong_global.set_namespaced_log(kong, saved.plugin_name)
   end

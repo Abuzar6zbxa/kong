@@ -1,192 +1,136 @@
 local proc_mgmt = require "kong.runloop.plugin_servers.process"
-local cjson = require "cjson.safe"
-local clone = require "table.clone"
-local ngx_ssl = require "ngx.ssl"
+local bridge = require "kong.runloop.plugin_servers.bridge"
 
 local type = type
 local pairs = pairs
-local ipairs = ipairs
-local tonumber = tonumber
 
 local ngx = ngx
 local kong = kong
-local ngx_var = ngx.var
 local ngx_sleep = ngx.sleep
-
-local coroutine_running = coroutine.running
-local get_ctx_table = require("resty.core.ctx").get_ctx_table
-
-local cjson_encode = cjson.encode
-local native_timer_at = _G.native_timer_at or ngx.timer.at
-
-local req_start_time
-local req_get_headers
-local resp_get_headers
-
-if ngx.config.subsystem == "http" then
-  req_start_time   = ngx.req.start_time
-  req_get_headers  = ngx.req.get_headers
-  resp_get_headers = ngx.resp.get_headers
-
-else
-  local NOOP = function() end
-
-  req_start_time   = NOOP
-  req_get_headers  = NOOP
-  resp_get_headers = NOOP
-end
 
 local SLEEP_STEP = 0.1
 local WAIT_TIME = 10
 local MAX_WAIT_STEPS = WAIT_TIME / SLEEP_STEP
 
---- keep request data a bit longer, into the log timer
-local save_for_later = {}
-
---- handle notifications from pluginservers
-local rpc_notifications = {}
+local get_instance_id
 
 --- currently running plugin instances
 local running_instances = {}
 
-local function get_saved()
-  return save_for_later[coroutine_running()]
+--- handle notifications from pluginservers
+local rpc_notifications = {}
+
+
+--- serverPid notification sent by the pluginserver.  if it changes,
+--- all instances tied to this RPC socket should be restarted.
+function rpc_notifications:serverPid(n)
+  n = tonumber(n)
+  if self.pluginserver_pid and n ~= self.pluginserver_pid then
+    for key, instance in pairs(running_instances) do
+      if instance.rpc == self then
+        running_instances[key] = nil
+      end
+    end
+  end
+
+  self.pluginserver_pid = n
 end
 
-local exposed_api = {
-  kong = kong,
-
-  ["kong.log.serialize"] = function()
-    local saved = get_saved()
-    return cjson_encode(saved and saved.serialize_data or kong.log.serialize())
-  end,
-
-  ["kong.nginx.get_var"] = function(v)
-    return ngx_var[v]
-  end,
-
-  ["kong.nginx.get_tls1_version_str"] = ngx_ssl.get_tls1_version_str,
-
-  ["kong.nginx.get_ctx"] = function(k)
-    local saved = get_saved()
-    local ngx_ctx = saved and saved.ngx_ctx or ngx.ctx
-    return ngx_ctx[k]
-  end,
-
-  ["kong.nginx.set_ctx"] = function(k, v)
-    local saved = get_saved()
-    local ngx_ctx = saved and saved.ngx_ctx or ngx.ctx
-    ngx_ctx[k] = v
-  end,
-
-  ["kong.ctx.shared.get"] = function(k)
-    local saved = get_saved()
-    local ctx_shared = saved and saved.ctx_shared or kong.ctx.shared
-    return ctx_shared[k]
-  end,
-
-  ["kong.ctx.shared.set"] = function(k, v)
-    local saved = get_saved()
-    local ctx_shared = saved and saved.ctx_shared or kong.ctx.shared
-    ctx_shared[k] = v
-  end,
-
-  ["kong.request.get_headers"] = function(max)
-    local saved = get_saved()
-    return saved and saved.request_headers or kong.request.get_headers(max)
-  end,
-
-  ["kong.request.get_header"] = function(name)
-    local saved = get_saved()
-    if not saved then
-      return kong.request.get_header(name)
+local function reset_instances_for_plugin(plugin_name)
+  for k, instance in pairs(running_instances) do
+    if instance.plugin_name == plugin_name then
+      running_instances[k] = nil
     end
+  end
+end
 
-    local header_value = saved.request_headers[name]
-    if type(header_value) == "table" then
-      header_value = header_value[1]
-    end
+--- reset_instance: removes an instance from the table.
+local function reset_instance(plugin_name, conf)
+  --
+  -- the same plugin (which acts as a plugin server) is shared among
+  -- instances of the plugin; for example, the same plugin can be applied
+  -- to many routes
+  -- `reset_instance` is called when (but not only) the plugin server died;
+  -- in such case, all associated instances must be removed, not only the current
+  --
+  reset_instances_for_plugin(plugin_name)
 
-    return header_value
-  end,
-
-  ["kong.request.get_uri_captures"] = function()
-    local saved = get_saved()
-    local ngx_ctx = saved and saved.ngx_ctx or ngx.ctx
-    return kong.request.get_uri_captures(ngx_ctx)
-  end,
-
-  ["kong.response.get_status"] = function()
-    local saved = get_saved()
-    return saved and saved.response_status or kong.response.get_status()
-  end,
-
-  ["kong.response.get_headers"] = function(max)
-    local saved = get_saved()
-    return saved and saved.response_headers or kong.response.get_headers(max)
-  end,
-
-  ["kong.response.get_header"] = function(name)
-    local saved = get_saved()
-    if not saved then
-      return kong.response.get_header(name)
-    end
-
-    local header_value = saved.response_headers and saved.response_headers[name]
-    if type(header_value) == "table" then
-      header_value = header_value[1]
-    end
-
-    return header_value
-  end,
-
-  ["kong.response.get_source"] = function()
-    local saved = get_saved()
-    return kong.response.get_source(saved and saved.ngx_ctx or nil)
-  end,
-
-  ["kong.nginx.req_start_time"] = function()
-    local saved = get_saved()
-    return saved and saved.req_start_time or req_start_time()
-  end,
-}
-
-
-local get_plugin
-local get_instance_id
-local reset_instance
-local reset_instances_for_plugin
+  local ok, err = kong.worker_events.post("plugin_server", "reset_instances", { plugin_name = plugin_name })
+  if not ok then
+    kong.log.err("failed to post plugin_server reset_instances event: ", err)
+  end
+end
 
 local protocol_implementations = {
   ["MsgPack:1"] = "kong.runloop.plugin_servers.mp_rpc",
   ["ProtoBuf:1"] = "kong.runloop.plugin_servers.pb_rpc",
 }
 
-local function get_server_rpc(server_def)
+local function get_server_rpc(plugin)
+  local server_def = plugin.server_def
+
   if not server_def.rpc then
 
     local rpc_modname = protocol_implementations[server_def.protocol]
     if not rpc_modname then
-      kong.log.err("Unknown protocol implementation: ", server_def.protocol)
-      return nil, "Unknown protocol implementation"
+      return nil, "unknown protocol implementation: " .. (server_def.protocol or "nil")
     end
 
+    kong.log.notice("[pluginserver] loading protocol ", server_def.protocol, " for plugin ", plugin.name)
+
     local rpc = require (rpc_modname)
-    rpc.get_instance_id = rpc.get_instance_id or get_instance_id
-    rpc.reset_instance = rpc.reset_instance or reset_instance
-    rpc.save_for_later = rpc.save_for_later or save_for_later
-    rpc.exposed_api = rpc.exposed_api or exposed_api
+    rpc.get_instance_id = get_instance_id
+    rpc.reset_instance = reset_instance
+    rpc.exposed_pdk = bridge.exposed_pdk
 
     server_def.rpc = rpc.new(server_def.socket, rpc_notifications)
+                                                -- XXX 2nd argument refers to "rpc notifications"
+                                                -- which is NYI in the pb-based protocol
+                                                -- so this applies only to mp-based,
+                                                -- consider moving it to the mp module
   end
 
   return server_def.rpc
 end
 
+-- module cache of loaded external plugins
+-- XXX do we need to invalidate - eg, when the pluginserver restarts?
+local loaded_plugins
 
+local function load_external_plugins()
+  if loaded_plugins then
+    return true
+  end
 
---- get_instance_id: gets an ID to reference a plugin instance running in a
---- pluginserver each configuration in the database is handled by a different
+  loaded_plugins = {}
+
+  local kong_config = kong.configuration
+
+  local plugins_info = proc_mgmt.load_external_plugins_info(kong_config)
+  assert(next(plugins_info), "failed loading external plugins")
+
+  for plugin_name, plugin in pairs(plugins_info) do
+    local plugin = bridge.build_phases(plugin)
+    local rpc, err = get_server_rpc(plugin)
+    if not rpc then
+      return nil, err
+    end
+
+    plugin.rpc = rpc
+    loaded_plugins[plugin_name] = plugin
+  end
+
+  return loaded_plugins
+end
+
+local function get_plugin(plugin_name)
+  assert(load_external_plugins())
+
+  return loaded_plugins[plugin_name]
+end
+
+--- get_instance_id: gets an ID to reference a plugin instance running in the
+--- pluginserver; each configuration of a plugin is handled by a different
 --- instance.  Biggest complexity here is due to the remote (and thus non-atomic
 --- and fallible) operation of starting the instance at the server.
 function get_instance_id(plugin_name, conf)
@@ -231,10 +175,9 @@ function get_instance_id(plugin_name, conf)
     instance_info.id = nil
   end
 
-  local plugin_info = get_plugin(plugin_name)
-  local server_rpc  = get_server_rpc(plugin_info.server_def)
+  local plugin = get_plugin(plugin_name)
 
-  local new_instance_info, err = server_rpc:call_start_instance(plugin_name, conf)
+  local new_instance_info, err = plugin.rpc:call_start_instance(plugin_name, conf)
   if new_instance_info == nil then
     kong.log.err("starting instance: ", err)
     -- remove claim, some other thread might succeed
@@ -251,129 +194,15 @@ function get_instance_id(plugin_name, conf)
 
   if old_instance_id then
     -- there was a previous instance with same key, close it
-    server_rpc:call_close_instance(old_instance_id)
+    plugin.rpc:call_close_instance(old_instance_id)
     -- don't care if there's an error, maybe other thread closed it first.
   end
 
   return instance_info.id
 end
 
-function reset_instances_for_plugin(plugin_name)
-  for k, instance in pairs(running_instances) do
-    if instance.plugin_name == plugin_name then
-      running_instances[k] = nil
-    end
-  end
-end
-
---- reset_instance: removes an instance from the table.
-function reset_instance(plugin_name, conf)
-  --
-  -- the same plugin (which acts as a plugin server) is shared among
-  -- instances of the plugin; for example, the same plugin can be applied
-  -- to many routes
-  -- `reset_instance` is called when (but not only) the plugin server died;
-  -- in such case, all associated instances must be removed, not only the current
-  --
-  reset_instances_for_plugin(plugin_name)
-
-  local ok, err = kong.worker_events.post("plugin_server", "reset_instances", { plugin_name = plugin_name })
-  if not ok then
-    kong.log.err("failed to post plugin_server reset_instances event: ", err)
-  end
-end
-
-
---- serverPid notification sent by the pluginserver.  if it changes,
---- all instances tied to this RPC socket should be restarted.
-function rpc_notifications:serverPid(n)
-  n = tonumber(n)
-  if self.pluginserver_pid and n ~= self.pluginserver_pid then
-    for key, instance in pairs(running_instances) do
-      if instance.rpc == self then
-        running_instances[key] = nil
-      end
-    end
-  end
-
-  self.pluginserver_pid = n
-end
-
-
---- Phase closures
-local function build_phases(plugin)
-  if not plugin then
-    return
-  end
-
-  local server_rpc = get_server_rpc(plugin.server_def)
-
-  for _, phase in ipairs(plugin.phases) do
-    if phase == "log" then
-      plugin[phase] = function(self, conf)
-        native_timer_at(0, function(premature, saved)
-          if premature then
-            return
-          end
-          get_ctx_table(saved.ngx_ctx)
-          local co = coroutine_running()
-          save_for_later[co] = saved
-          server_rpc:handle_event(self.name, conf, phase)
-          save_for_later[co] = nil
-        end, {
-          plugin_name = self.name,
-          serialize_data = kong.log.serialize(),
-          ngx_ctx = clone(ngx.ctx),
-          ctx_shared = kong.ctx.shared,
-          request_headers = req_get_headers(),
-          response_headers = resp_get_headers(),
-          response_status = ngx.status,
-          req_start_time = req_start_time(),
-        })
-      end
-
-    else
-      plugin[phase] = function(self, conf)
-        server_rpc:handle_event(self.name, conf, phase)
-      end
-    end
-  end
-
-  return plugin
-end
-
-
 --- module table
 local _M = {}
-
--- module cache of loaded external plugins
--- XXX what to do about invalidations?
-local loaded_plugins
-
-local function load_external_plugins()
-  if loaded_plugins then
-    return true
-  end
-
-  loaded_plugins = {}
-
-  local kong_config = kong.configuration
-
-  local plugins_info = proc_mgmt.load_external_plugins_info(kong_config)
-  assert(next(plugins_info), "failed loading external plugins")
-
-  for plugin_name, plugin in pairs(plugins_info) do
-    loaded_plugins[plugin_name] = build_phases(plugin)
-  end
-
-  return loaded_plugins
-end
-
-function get_plugin(plugin_name)
-  load_external_plugins()
-
-  return loaded_plugins[plugin_name]
-end
 
 function _M.load_plugin(plugin_name)
   local plugin = get_plugin(plugin_name)

@@ -133,7 +133,7 @@ do
       return method_cache[method]
 
     else
-      method_cache[method] = index_table(Rpc.exposed_api, method)
+      method_cache[method] = index_table(Rpc.exposed_pdk, method)
       return method_cache[method]
     end
   end
@@ -147,7 +147,7 @@ local function call_pdk_method(cmd, args)
     return
   end
 
-  local saved = Rpc.save_for_later[coroutine.running()]
+  local saved = Rpc.exposed_pdk.get_saved_for_later()
   if saved and saved.plugin_name then
     kong_global.set_namespaced_log(kong, saved.plugin_name)
   end
