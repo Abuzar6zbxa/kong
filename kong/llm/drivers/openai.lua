@@ -11,8 +11,28 @@ local socket_url = require "socket.url"
 local DRIVER_NAME = "openai"
 --
 
+-- merge_defaults takes the model options, and sets any defaults defined,
+-- if the caller hasn't explicitly set them
+--
+-- we have already checked that "max_tokens" isn't overridden when it
+-- is not allowed to do so.
+local function merge_defaults(request, options)
+  local merging = {
+    [1] = "max_tokens",
+    [2] = "temperature",
+    [3] = "top_p",
+    [4] = "top_k",
+  }
+
+  for i, v in ipairs(merging) do
+    request[v] = request[v] or (options and options[v]) or nil
+  end
+
+  return request
+end
+
 local transformers_to = {
-  ["llm/v1/chat"] = function(request_table, model, max_tokens, temperature, top_p)
+  ["llm/v1/chat"] = function(request_table, model_info, route_type)
     -- if user passed a prompt as a chat, transform it to a chat message
     if request_table.prompt then
       request_table.messages = {
@@ -22,27 +42,18 @@ local transformers_to = {
         }
       }
     end
+
+    request_table = merge_defaults(request_table, model_info.options)
+    request_table.model = model_info.name
   
-    local this = {
-      model = model,
-      messages = request_table.messages,
-      max_tokens = max_tokens,
-      temperature = temperature,
-      top_p = top_p,
-    }
-  
-    return this, "application/json", nil
+    return request_table, "application/json", nil
   end,
 
-  ["llm/v1/completions"] = function(request_table, model, max_tokens, temperature, top_p)
-    local this = {
-      prompt = request_table.prompt,
-      model = model,
-      max_tokens = max_tokens,
-      temperature = temperature,
-    }
+  ["llm/v1/completions"] = function(request_table, model_info, route_type)
+    request_table = merge_defaults(request_table, model_info.options)
+    request_table.model = model_info.name
 
-    return this, "application/json", nil
+    return request_table, "application/json", nil
   end,
 }
 
@@ -109,10 +120,7 @@ function _M.to_format(request_table, model_info, route_type)
   local ok, response_object, content_type, err = pcall(
     transformers_to[route_type],
     request_table,
-    model_info.name,
-    (model_info.options and model_info.options.max_tokens),
-    (model_info.options and model_info.options.temperature),
-    (model_info.options and model_info.options.top_p)
+    model_info
   )
   if err or (not ok) then
     return nil, nil, fmt("error transforming to %s://%s", model_info.provider, route_type)
@@ -190,8 +198,8 @@ end
 
 function _M.pre_request(conf, body)
   -- check for user trying to bring own model
-  if body and body.model then
-    return nil, "cannot use own model for this instance"
+  if body and body.model and (body.model ~= conf.model.name) then
+    return nil, "requested model does not match the configured plugin model"
   end
 
   return true, nil

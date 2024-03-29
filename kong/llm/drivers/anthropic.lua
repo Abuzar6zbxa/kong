@@ -68,8 +68,22 @@ local transformers_to = {
       return nil, nil, err
     end
     
-    prompt.temperature = (model.options and model.options.temperature) or nil
-    prompt.max_tokens_to_sample = (model.options and model.options.max_tokens) or nil
+    prompt.temperature = request_table.temperature
+                      or (model.options and model.options.temperature) 
+                      or nil
+
+    prompt.max_tokens_to_sample = request_table.max_tokens
+                               or (model.options and model.options.max_tokens)
+                               or nil
+
+    prompt.top_p = request_table.top_p
+                or (model.options and model.options.top_p)
+                or nil
+
+    prompt.top_k = request_table.top_k
+                or (model.options and model.options.top_k)
+                or nil
+
     prompt.model = model.name
 
     return prompt, "application/json", nil
@@ -84,8 +98,22 @@ local transformers_to = {
       return nil, nil, err
     end
     
-    prompt.temperature = (model.options and model.options.temperature) or nil
-    prompt.max_tokens_to_sample = (model.options and model.options.max_tokens) or nil
+    prompt.temperature = request_table.temperature
+                      or (model.options and model.options.temperature) 
+                      or nil
+
+    prompt.max_tokens_to_sample = request_table.max_tokens
+                               or (model.options and model.options.max_tokens)
+                               or nil
+
+    prompt.top_p = request_table.top_p
+                or (model.options and model.options.top_p)
+                or nil
+
+    prompt.top_k = request_table.top_k
+                or (model.options and model.options.top_k)
+                or nil
+
     prompt.model = model.name
 
     return prompt, "application/json", nil
@@ -264,8 +292,8 @@ end
 
 function _M.pre_request(conf, body)
   -- check for user trying to bring own model
-  if body and body.model then
-    return nil, "cannot use own model for this instance"
+  if body and body.model and (body.model ~= conf.model.name) then
+    return nil, "requested model does not match the configured plugin model"
   end
 
   return true, nil
